@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "cesium": "^1.136.0"
+  }
+}
