@@ -1,52 +1,88 @@
 <template>
-  <div class="sat-topology-wrap">
-    <div class="controls">
-      <label class="control-item">
-        <span class="label" style="text-align:left; display:block;">卫星编号</span>
-        <input
-          class="input"
-          v-model.trim="satId"
-          placeholder="例如：Sat_1_1"
-        />
-      </label>
-    </div>
-
-    <div class="sat-topology">
-      <v-network-graph :nodes="nodes" :edges="edges" :layouts="layouts">
-        <template #edge-label="{ edge, ...slotProps }">
-          <v-edge-label
-            :text="edge.label"
-            align="center"
-            vertical-align="above"
-            v-bind="slotProps"
+  <div class="topology-wrap">
+    <div class="topology-section">
+      <h3>卫星拓扑</h3>
+      <div class="controls">
+        <label class="control-item">
+          <span class="label" style="text-align:left; display:block;">卫星编号</span>
+          <input
+            class="input"
+            v-model.trim="satId"
+            placeholder="例如：Sat_1_1"
           />
-        </template>
-      </v-network-graph>
+        </label>
+      </div>
 
-      <div v-if="status !== 'ready'" class="overlay">
-        <div class="overlay-text">
-          <template v-if="status === 'loading'">数据加载中…</template>
-          <template v-else-if="status === 'not_found'"
-            >未找到该卫星在此时间的拓扑数据</template
-          >
-          <template v-else>数据加载失败：{{ errorMsg }}</template>
+      <div class="topology">
+        <v-network-graph :nodes="nodes" :edges="edges" :layouts="layouts">
+          <template #edge-label="{ edge, ...slotProps }">
+            <v-edge-label
+              :text="edge.label"
+              align="center"
+              vertical-align="above"
+              v-bind="slotProps"
+            />
+          </template>
+        </v-network-graph>
+
+        <div v-if="status !== 'ready'" class="overlay">
+          <div class="overlay-text">
+            <template v-if="status === 'loading'">数据加载中…</template>
+            <template v-else-if="status === 'not_found'"
+              >未找到该卫星在此时间的拓扑数据</template
+            >
+            <template v-else>数据加载失败：{{ errorMsg }}</template>
+          </div>
         </div>
       </div>
+
+      <div class="control-item timeline" v-if="timeList.length">
+        <div class="timeline-top">
+          <span class="label">时间</span>
+          <span class="value">{{ selectedTimeLabel }}</span>
+        </div>
+        <input
+          class="slider"
+          type="range"
+          min="0"
+          :max="Math.max(0, timeList.length - 1)"
+          step="1"
+          v-model.number="timeIndex"
+        />
+      </div>
     </div>
 
-    <div class="control-item timeline" v-if="timeList.length">
-      <div class="timeline-top">
-        <span class="label">时间</span>
-        <span class="value">{{ selectedTimeLabel }}</span>
+    <div class="topology-section">
+      <h3>路由器拓扑</h3>
+      <div class="controls">
+        <label class="control-item">
+          <span class="label" style="text-align:left; display:block;">卫星编号</span>
+          <input
+            class="input"
+            v-model.trim="selectedRouter"
+            placeholder="例如：r001001"
+          />
+        </label>
       </div>
-      <input
-        class="slider"
-        type="range"
-        min="0"
-        :max="Math.max(0, timeList.length - 1)"
-        step="1"
-        v-model.number="timeIndex"
-      />
+      <div class="topology">
+        <v-network-graph :nodes="routerNodes" :edges="routerEdges" :layouts="routerLayouts">
+          <template #edge-label="{ edge, ...slotProps }">
+            <v-edge-label
+              :text="edge.label"
+              align="center"
+              vertical-align="above"
+              v-bind="slotProps"
+            />
+          </template>
+        </v-network-graph>
+
+        <div v-if="routerStatus !== 'ready'" class="overlay">
+          <div class="overlay-text">
+            <template v-if="routerStatus === 'loading'">数据加载中…</template>
+            <template v-else>数据加载失败：{{ routerErrorMsg }}</template>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -63,6 +99,17 @@ import "v-network-graph/lib/style.css";
 
 const status = ref("loading"); // loading | ready | not_found | error
 const errorMsg = ref("");
+
+// Router topology
+const routerStatus = ref("loading");
+const routerErrorMsg = ref("");
+const routers = [
+  'r001001', 'r001002', 'r001003', 'r001004', 'r001005',
+  'r002001', 'r002002', 'r002003', 'r002004', 'r002005',
+  'r003001', 'r003002', 'r003003', 'r003004', 'r003005'
+];
+const selectedRouter = ref("r001001");
+const routerConnections = ref(new Map()); // Store all connections
 
 // 输入：卫星编号 + 时间轴
 const satId = ref("Sat_1_1");
@@ -150,7 +197,150 @@ async function loadCsv() {
   }
 }
 
-onMounted(loadCsv);
+async function loadRouterData() {
+  routerStatus.value = "loading";
+  routerErrorMsg.value = "";
+
+  try {
+    const connections = new Map(); // source -> Set of targets
+
+    for (const router of routers) {
+      const resp = await fetch(`/data/router/${router}_net_qos.csv`);
+      if (!resp.ok) {
+        console.warn(`Failed to load ${router}_net_qos.csv: ${resp.status}`);
+        continue;
+      }
+
+      const text = await resp.text();
+      const lines = text.split(/\r?\n/).filter(l => l.trim());
+      if (lines.length < 2) continue;
+
+      const header = lines[0].split(',').map(s => s.trim());
+      const col = Object.fromEntries(header.map((h, i) => [h, i]));
+
+      if (!connections.has(router)) connections.set(router, new Set());
+
+      for (let i = 1; i < lines.length; i++) {
+        const parts = lines[i].split(',').map(s => s.trim());
+        const directNode = parts[col['直连节点']];
+        if (directNode && directNode !== router) {
+          connections.get(router).add(directNode);
+        }
+      }
+    }
+
+    routerConnections.value = connections;
+
+    // Initially build graph for default selected router
+    updateRouterGraph();
+
+    routerStatus.value = "ready";
+  } catch (e) {
+    routerStatus.value = "error";
+    routerErrorMsg.value = e?.message ?? String(e);
+  }
+}
+
+function updateRouterGraph() {
+  const connections = routerConnections.value;
+  const startRouter = selectedRouter.value;
+
+  if (!connections.has(startRouter)) {
+    // Clear graph if no connections
+    for (const k of Object.keys(routerNodes)) delete routerNodes[k];
+    for (const k of Object.keys(routerEdges)) delete routerEdges[k];
+    routerLayouts.nodes = {};
+    return;
+  }
+
+  // BFS to find all routers within 16 hops
+  const reachable = new Set();
+  const queue = [{ router: startRouter, hops: 0 }];
+  const visited = new Set([startRouter]);
+
+  while (queue.length > 0) {
+    const { router, hops } = queue.shift();
+    reachable.add(router);
+
+    if (hops >= 16) continue;
+
+    const neighbors = connections.get(router) || new Set();
+    for (const neighbor of neighbors) {
+      if (!visited.has(neighbor)) {
+        visited.add(neighbor);
+        queue.push({ router: neighbor, hops: hops + 1 });
+      }
+    }
+  }
+
+  // Build nodes
+  for (const k of Object.keys(routerNodes)) delete routerNodes[k];
+  for (const router of reachable) {
+    routerNodes[router] = { name: router };
+  }
+
+  // Build edges (only between reachable nodes)
+  for (const k of Object.keys(routerEdges)) delete routerEdges[k];
+  const addedEdges = new Set();
+  let edgeId = 1;
+  for (const source of reachable) {
+    const targets = connections.get(source) || new Set();
+    for (const target of targets) {
+      if (reachable.has(target)) {
+        const edgeKey = source < target ? `${source}-${target}` : `${target}-${source}`;
+        if (!addedEdges.has(edgeKey)) {
+          addedEdges.add(edgeKey);
+          routerEdges[`edge${edgeId++}`] = {
+            source,
+            target,
+            label: '连接'
+          };
+        }
+      }
+    }
+  }
+
+  // Layout: circular layout grouped by orbits
+  routerLayouts.nodes = {};
+  routerLayouts.type = 'manual'; // Use manual positioning
+  
+  // Group routers by orbit
+  const orbitGroups = {
+    '001': [],
+    '002': [],
+    '003': []
+  };
+  
+  for (const router of reachable) {
+    const orbit = router.substring(1, 4); // Extract orbit number (001, 002, 003)
+    if (orbitGroups[orbit]) {
+      orbitGroups[orbit].push(router);
+    }
+  }
+  
+  // Position each orbit in concentric circles
+  const centerX = 0, centerY = 0;
+  const orbitConfigs = {
+    '001': { radius: 250, angleOffset: 0 },
+    '002': { radius: 180, angleOffset: Math.PI / 6 },
+    '003': { radius: 110, angleOffset: Math.PI / 3 }
+  };
+  
+  for (const [orbit, routers] of Object.entries(orbitGroups)) {
+    if (routers.length === 0) continue;
+    
+    const config = orbitConfigs[orbit];
+    const angleStep = (2 * Math.PI) / routers.length;
+    
+    routers.forEach((router, i) => {
+      const angle = i * angleStep + config.angleOffset;
+      routerLayouts.nodes[router] = {
+        x: centerX + config.radius * Math.cos(angle),
+        y: centerY + config.radius * Math.sin(angle)
+      };
+    });
+  }
+}
 
 const selectedTime = computed(() => timeList.value[timeIndex.value] ?? "");
 const selectedTimeLabel = computed(() => selectedTime.value.replace(/^'/, ""));
@@ -162,10 +352,27 @@ const currentRow = computed(() => {
   return satMap.get(selectedTime.value) ?? null;
 });
 
+onMounted(() => {
+  loadCsv();
+  loadRouterData();
+});
+
+// Watch for router selection changes
+watch(selectedRouter, () => {
+  if (routerStatus.value === "ready") {
+    updateRouterGraph();
+  }
+});
+
 // graph 数据（保持生成逻辑不变：中心卫星 + 前后左右四条边）
 const nodes = reactive({});
 const edges = reactive({});
 const layouts = reactive({ nodes: {} });
+
+// Router graph data
+const routerNodes = reactive({});
+const routerEdges = reactive({});
+const routerLayouts = reactive({ nodes: {} });
 
 function applyRowToGraph(row) {
   // 清空旧数据（保持 reactive 对象引用不变）
@@ -232,22 +439,40 @@ watch(
 </script>
 
 <style scoped>
-.sat-topology-wrap {
+.topology-wrap {
+  display: flex;
+  flex-direction: row;
+  gap: 20px;
+  width: 100%;
+  height: 100vh;
+  padding: 20px;
+  box-sizing: border-box;
+}
+
+.topology-section {
+  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 12px;
 }
 
+.topology-section h3 {
+  margin: 0;
+  color: #ffffff;
+}
+
 .controls {
-  width: 520px;
+  width: 100%;
+  max-width: 520px;
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
 
 .timeline {
-  width: 520px;
+  width: 100%;
+  max-width: 520px;
 }
 
 .control-item {
@@ -288,11 +513,13 @@ watch(
   width: 100%;
 }
 
-.sat-topology {
+.topology {
   position: relative;
   background: #fff;
-  width: 520px;
-  height: min(520px, calc(100vh - 48px));
+  width: 100%;
+  min-width: 700px;
+  max-width: 900px;
+  height: min(700px, calc(100vh - 150px));
   border-radius: 12px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
   overflow: hidden;
