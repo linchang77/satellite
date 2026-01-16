@@ -1,5 +1,7 @@
 {
   "dependencies": {
-    "cesium": "^1.136.0"
+    "cesium": "^1.136.0",
+    "echarts": "^5.6.0",
+    "echarts-gl": "^2.0.9"
   }
 }
