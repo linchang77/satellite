@@ -12,6 +12,7 @@
     "cesium": "1.99",
     "echarts": "^5.6.0",
     "echarts-gl": "^2.0.9",
+    "papaparse": "^5.5.3",
     "three": "^0.182.0",
     "v-network-graph": "^0.9.21",
     "vite-plugin-cesium": "^1.2.23",

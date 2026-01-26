@@ -23,19 +23,18 @@
           <div class="label">Mode</div>
           <select class="select" v-model="linkMode" :disabled="!ready || !showLinks">
             <option value="orbit">Same-orbit ring</option>
-            <option value="nearest">Nearest neighbors (K)</option>
-            <option value="threshold">Distance threshold (km)</option>
+            <option value="delay">Delay matrix (CSV)</option>
           </select>
         </div>
 
-        <div class="row2" v-if="linkMode === 'nearest'">
-          <div class="label">K</div>
-          <input class="input" type="number" min="1" max="8" v-model.number="nearestK" />
+        <div class="small" v-if="linkMode === 'delay'">
+          Source: <span class="mono">/public/data/delay_15x15.csv</span><br />
+          Rule: delay != 0 → connect + label
         </div>
 
-        <div class="row2" v-if="linkMode === 'threshold'">
-          <div class="label">Threshold (km)</div>
-          <input class="input" type="number" min="100" step="50" v-model.number="distKm" />
+        <div class="small" v-if="linkMode === 'orbit'">
+          Click a node → show all delay≠0 edges connected to it (highlighted + labels).<br />
+          Click empty space → clear selection.
         </div>
 
         <button class="btn wide" @click="resetView" :disabled="!ready">Reset view</button>
@@ -94,14 +93,14 @@
 import { onMounted, onBeforeUnmount, ref, watch, markRaw } from "vue";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { CSS2DRenderer, CSS2DObject } from "three/examples/jsm/renderers/CSS2DRenderer.js";
+import { TubeGeometry, LineCurve3 } from "three";
 
 type SatT0 = {
   id: string;
   orbit: number;
   slot: number;
 
-  // T0 fields
   utc: string;
 
   r: [number, number, number]; // km (J2000)
@@ -121,6 +120,13 @@ type SatT0 = {
 
 type Selected = Omit<SatT0, "mesh" | "r"> & { r: [number, number, number] };
 
+type DelayEdge = {
+  aId: string;
+  bId: string;
+  delayS: number;
+  distKm: number;
+};
+
 const host = ref<HTMLDivElement | null>(null);
 
 const loading = ref(true);
@@ -128,48 +134,61 @@ const ready = ref(false);
 const loadProgress = ref("");
 const t0Label = ref("");
 
-// ✅ 改为 ref，避免 Vue 深代理 THREE.Mesh 导致 renderer 报错
 const sats = ref<SatT0[]>([]);
 const selected = ref<Selected | null>(null);
 
 // link controls
 const showLinks = ref(true);
-const linkMode = ref<"orbit" | "nearest" | "threshold">("orbit");
-const nearestK = ref(2);
-const distKm = ref(2000);
+const linkMode = ref<"orbit" | "delay">("orbit");
+
+// delay matrix
+const DELAY_CSV = "/data/delay_15x15.csv";
+const C_KM_S = 299792.458; // 光速 km/s
+const delayEdges = ref<DelayEdge[]>([]);
 
 // three
 let renderer: THREE.WebGLRenderer | null = null;
+let labelRenderer: CSS2DRenderer | null = null;
+
 let scene: THREE.Scene | null = null;
 let camera: THREE.PerspectiveCamera | null = null;
 let controls: OrbitControls | null = null;
+
 let raf = 0;
 let resizeObs: ResizeObserver | null = null;
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 
+// orbit lines
 let orbitLinkLines = new Map<number, THREE.LineSegments>();
 
+// delay mode (all edges) line + labels
+let delayLine: THREE.LineSegments | null = null;
+const delayModeLabels: CSS2DObject[] = [];
+
+// orbit mode selection highlight group (delay edges incident to selected)
+let delayHighlightGroup: THREE.Group | null = null;
+
+// node labels
+const nodeLabels: CSS2DObject[] = [];
 
 // scale: km -> world units (1000 km = 1 unit)
 const KM_TO_UNITS = 1 / 1000;
 
-// 自定义的轨道颜色表
-const ORBIT_COLORS = [
-  0x4cc9f0, // orbit 6
-  0x4ade80, // orbit 7
-  0xa78bfa, // orbit 8
-  0xfbbf24, // orbit 9（备用）
-  0xfb7185, // orbit 10（备用）
-];
-
+// colors
+const ORBIT_COLORS = [0x4cc9f0, 0x4ade80, 0xa78bfa, 0xfbbf24, 0xfb7185];
 function colorForOrbit(orbit: number) {
   return ORBIT_COLORS[orbit % ORBIT_COLORS.length];
 }
 
+// highlight style
+const HIGHLIGHT_COLOR = 0xffcc66;
+const HIGHLIGHT_RADIUS = 0.02; // world units: 0.01~0.03 调整粗细
+const HIGHLIGHT_TUBULAR_SEG = 8;
+const HIGHLIGHT_RADIAL_SEG = 10;
 
-// 你贴出来的 15 个文件名（按需改这里）
+// files
 const CSV_FILES = [
   "Sat_6_6_ephem_ext.csv",
   "Sat_6_7_ephem_ext.csv",
@@ -239,11 +258,22 @@ function addLights(s: THREE.Scene) {
   s.add(d);
 }
 
+function addNodeLabel(mesh: THREE.Mesh, text: string) {
+  const div = document.createElement("div");
+  div.className = "node-label";
+  div.textContent = text;
+
+  const obj = new CSS2DObject(div);
+  obj.position.set(0, 0.18, 0);
+  mesh.add(obj);
+  nodeLabels.push(obj);
+}
+
 function setHighlight(mesh: THREE.Mesh | null) {
   for (const sat of sats.value) {
     const mat = sat.mesh.material as THREE.MeshStandardMaterial;
     mat.emissive.setHex(0x000000);
-    mat.color.setHex(0xb9d4ff);
+    mat.color.setHex(colorForOrbit(sat.orbit));
     sat.mesh.scale.setScalar(1);
   }
   if (mesh) {
@@ -261,19 +291,74 @@ function resetView() {
   controls.update();
 }
 
-function rebuildLinks() {
+// ---------- clear helpers ----------
+function clearOrbitLinks() {
   if (!scene) return;
-
-  // 清理旧的轨道连线
   for (const line of orbitLinkLines.values()) {
     scene.remove(line);
     line.geometry.dispose();
     (line.material as THREE.Material).dispose();
   }
   orbitLinkLines.clear();
+}
 
-  if (!showLinks.value) return;
-  if (linkMode.value !== "orbit") return;
+function clearDelayModeLinks() {
+  if (!scene) return;
+
+  if (delayLine) {
+    scene.remove(delayLine);
+    delayLine.geometry.dispose();
+    (delayLine.material as THREE.Material).dispose();
+    delayLine = null;
+  }
+
+  for (const lab of delayModeLabels) scene.remove(lab);
+  delayModeLabels.length = 0;
+}
+
+function clearDelayHighlight() {
+  if (!scene) return;
+  if (!delayHighlightGroup) return;
+
+  // 先从 scene 移除整个 group
+  scene.remove(delayHighlightGroup);
+
+  // 再把里面所有子对象显式移除并释放资源
+  const toDispose: THREE.Object3D[] = [];
+  delayHighlightGroup.traverse((obj) => {
+    toDispose.push(obj);
+  });
+
+  for (const obj of toDispose) {
+    // ✅ 标签：CSS2DObject 也是 Object3D，需要 remove 掉
+    if (obj.parent) obj.parent.remove(obj);
+
+    // ✅ 粗线：Mesh 要 dispose
+    if (obj instanceof THREE.Mesh) {
+      (obj.geometry as THREE.BufferGeometry)?.dispose?.();
+      const mat = obj.material as THREE.Material | THREE.Material[];
+      if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
+      else mat?.dispose?.();
+    }
+  }
+
+  delayHighlightGroup = null;
+}
+
+function clearAllSats() {
+  if (!scene) return;
+  nodeLabels.length = 0;
+  for (const sat of sats.value) {
+    scene.remove(sat.mesh);
+    (sat.mesh.geometry as THREE.BufferGeometry).dispose();
+    (sat.mesh.material as THREE.Material).dispose();
+  }
+  sats.value = [];
+}
+
+// ---------- build links ----------
+function buildOrbitLinksOnly() {
+  if (!scene) return;
 
   // orbit -> sats
   const map = new Map<number, SatT0[]>();
@@ -283,55 +368,190 @@ function rebuildLinks() {
     map.set(sat.orbit, arr);
   }
 
-  // 每个 orbit 单独一条 LineSegments（非闭环：不连首尾）
-for (const [orbit, arr] of map.entries()) {
-  if (arr.length < 2) continue;
+  for (const [orbit, arr] of map.entries()) {
+    if (arr.length < 2) continue;
 
-  arr.sort((a, b) => a.slot - b.slot);
+    arr.sort((a, b) => a.slot - b.slot);
 
+    const positions: number[] = [];
+    for (let i = 0; i < arr.length - 1; i++) {
+      const a = arr[i].mesh.position;
+      const b = arr[i + 1].mesh.position;
+      positions.push(a.x, a.y, a.z, b.x, b.y, b.z);
+    }
+
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+
+    const mat = new THREE.LineBasicMaterial({
+      color: colorForOrbit(orbit),
+      transparent: true,
+      opacity: 0.35,
+    });
+
+    const line = new THREE.LineSegments(geom, mat);
+    line.frustumCulled = false;
+
+    scene.add(line);
+    orbitLinkLines.set(orbit, line);
+  }
+}
+
+function buildDelayLinksAll() {
+  if (!scene) return;
+
+  const satById = new Map(sats.value.map((s) => [s.id, s]));
   const positions: number[] = [];
-  for (let i = 0; i < arr.length - 1; i++) {
-    const a = arr[i].mesh.position;
-    const b = arr[i + 1].mesh.position;
-    positions.push(a.x, a.y, a.z, b.x, b.y, b.z);
+
+  for (const e of delayEdges.value) {
+    const a = satById.get(e.aId);
+    const b = satById.get(e.bId);
+    if (!a || !b) continue;
+
+    const pa = a.mesh.position;
+    const pb = b.mesh.position;
+
+    positions.push(pa.x, pa.y, pa.z, pb.x, pb.y, pb.z);
+
+    const mid = new THREE.Vector3().addVectors(pa, pb).multiplyScalar(0.5);
+
+    const div = document.createElement("div");
+    div.className = "edge-label";
+    div.textContent =
+      `delay: ${e.delayS.toFixed(6)} s\n` +
+      `dist: ${e.distKm.toFixed(1)} km`;
+
+    const obj = new CSS2DObject(div);
+    obj.position.copy(mid);
+
+    scene.add(obj);
+    delayModeLabels.push(obj);
   }
 
   const geom = new THREE.BufferGeometry();
   geom.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
 
   const mat = new THREE.LineBasicMaterial({
-    color: colorForOrbit(orbit),
+    color: 0xffffff,
     transparent: true,
     opacity: 0.35,
   });
 
-  const line = new THREE.LineSegments(geom, mat);
-  line.frustumCulled = false;
+  delayLine = new THREE.LineSegments(geom, mat);
+  delayLine.frustumCulled = false;
+  scene.add(delayLine);
+}
 
-  scene.add(line);
-  orbitLinkLines.set(orbit, line);
+function buildDelayHighlightForSelected(selectedId: string | null) {
+  if (!scene) return;
+
+  clearDelayHighlight();
+  if (!selectedId) return;
+
+  const rel = delayEdges.value.filter((e) => e.aId === selectedId || e.bId === selectedId);
+  if (!rel.length) return;
+
+  const satById = new Map(sats.value.map((s) => [s.id, s]));
+  const group = new THREE.Group();
+
+  const mat = new THREE.MeshStandardMaterial({
+    color: HIGHLIGHT_COLOR,
+    roughness: 0.35,
+    metalness: 0.15,
+    emissive: new THREE.Color(0x553300),
+    emissiveIntensity: 0.6,
+  });
+
+  for (const e of rel) {
+    const a = satById.get(e.aId);
+    const b = satById.get(e.bId);
+    if (!a || !b) continue;
+
+    const pa = a.mesh.position.clone();
+    const pb = b.mesh.position.clone();
+
+    // 粗线（Tube）
+    const curve = new LineCurve3(pa, pb);
+    const tube = new TubeGeometry(curve, HIGHLIGHT_TUBULAR_SEG, HIGHLIGHT_RADIUS, HIGHLIGHT_RADIAL_SEG, false);
+    const tubeMesh = new THREE.Mesh(tube, mat);
+    tubeMesh.frustumCulled = false;
+    group.add(tubeMesh);
+
+    // 标签（注意：add 到 group，不要 add 到 scene）
+    const mid = new THREE.Vector3().addVectors(pa, pb).multiplyScalar(0.5);
+
+    const div = document.createElement("div");
+    div.className = "edge-label edge-label--highlight";
+    div.textContent =
+      `delay: ${e.delayS.toFixed(6)} s\n` +
+      `dist: ${e.distKm.toFixed(1)} km`;
+
+    const obj = new CSS2DObject(div);
+    obj.position.copy(mid);
+    group.add(obj); // ✅ 关键：只挂在 group 下
+  }
+
+  scene.add(group);
+  delayHighlightGroup = group;
+}
+
+
+function rebuildLinks() {
+  if (!scene) return;
+
+  clearOrbitLinks();
+  clearDelayModeLinks();
+  clearDelayHighlight();
+
+  if (!showLinks.value) return;
+
+  if (linkMode.value === "orbit") {
+    buildOrbitLinksOnly();
+    buildDelayHighlightForSelected(selected.value?.id ?? null);
+    return;
+  }
+
+  if (linkMode.value === "delay") {
+    buildDelayLinksAll();
+    return;
   }
 }
 
-function onPointerDown(ev: PointerEvent) {
-  if (!renderer || !camera) return;
+// ✅ 关键：只拾取节点，不拾取 tube / 线段 / labels
+function pickSatMesh(ev: PointerEvent): THREE.Mesh | null {
+  if (!renderer || !camera) return null;
+
   const rect = renderer.domElement.getBoundingClientRect();
   pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -(((ev.clientY - rect.top) / rect.height) * 2 - 1);
 
   raycaster.setFromCamera(pointer, camera);
-  const hits = raycaster.intersectObjects(sats.value.map((s) => s.mesh), false);
 
-  if (!hits.length) {
+  // ✅ 只检测卫星节点 mesh（避免点到 tube 时不取消）
+  const hits = raycaster.intersectObjects(
+    sats.value.map((s) => s.mesh),
+    false
+  );
+
+  return hits.length ? (hits[0].object as THREE.Mesh) : null;
+}
+
+function onPointerDown(ev: PointerEvent) {
+  const mesh = pickSatMesh(ev);
+
+  // ✅ 点空白：一律取消选中 + 清除高亮/标签
+  if (!mesh) {
     setHighlight(null);
     selected.value = null;
+
+    if (linkMode.value === "orbit") buildDelayHighlightForSelected(null);
     return;
   }
 
-  const m = hits[0].object as THREE.Mesh;
-  setHighlight(m);
+  // ✅ 点到节点：选中
+  setHighlight(mesh);
 
-  const ud = m.userData as { id: string };
+  const ud = mesh.userData as { id: string };
   const sat = sats.value.find((x) => x.id === ud.id);
   if (!sat) return;
 
@@ -351,27 +571,32 @@ function onPointerDown(ev: PointerEvent) {
     coe_ArgPerigee: sat.coe_ArgPerigee,
     coe_TrueAnomaly: sat.coe_TrueAnomaly,
   };
+
+  if (linkMode.value === "orbit") buildDelayHighlightForSelected(sat.id);
 }
 
 function animate() {
   if (!renderer || !scene || !camera) return;
   controls?.update();
   renderer.render(scene, camera);
+  labelRenderer?.render(scene, camera);
   raf = requestAnimationFrame(animate);
 }
 
-// ---------- data: read only first data row (T0) ----------
+// ---------- data ----------
 async function loadT0() {
   loading.value = true;
   ready.value = false;
   loadProgress.value = "";
 
-  // 清空旧数据
-  sats.value = [];
+  clearOrbitLinks();
+  clearDelayModeLinks();
+  clearDelayHighlight();
+  clearAllSats();
+
   selected.value = null;
   t0Label.value = "";
 
-  // 逐文件加载：失败不中断（保证能看到已成功的节点）
   for (let i = 0; i < CSV_FILES.length; i++) {
     const file = CSV_FILES[i];
     loadProgress.value = `${i + 1}/${CSV_FILES.length} ${file}`;
@@ -396,7 +621,6 @@ async function loadT0() {
         throw new Error(`Missing required cols in ${file}: need UTCG,r_x,r_y,r_z`);
       }
 
-      // first data row (T0)
       const r0 = rows[1];
       const utc = r0[idxUTCG];
 
@@ -418,36 +642,16 @@ async function loadT0() {
       const { orbit, slot } = parseOrbitSlotFromFilename(file);
       const id = file.replace("_ephem_ext.csv", "");
 
-      // ✅ 关键：mesh 不要被 Vue 代理（否则 three render 会报 modelViewMatrix proxy 错误）
       const mesh = markRaw(makeNodeMesh());
-      const mat = mesh.material as THREE.MeshStandardMaterial;
-      mat.color.setHex(colorForOrbit(orbit));
+      const mtl = mesh.material as THREE.MeshStandardMaterial;
+      mtl.color.setHex(colorForOrbit(orbit));
 
       mesh.name = "Sat";
       mesh.userData = { id };
 
-      // position in scene
       mesh.position.set(rx * KM_TO_UNITS, ry * KM_TO_UNITS, rz * KM_TO_UNITS);
 
-      // ===== DEBUG: print parsed T0 row =====
-      console.groupCollapsed(`[T0] ${file}`);
-      console.log("UTCG:", utc);
-      console.log("r (km):", { rx, ry, rz });
-      console.log("LLA:", {
-        lat: numAt(r0, idxLat),
-        lon: numAt(r0, idxLon),
-        alt: numAt(r0, idxAlt),
-      });
-      console.log("COE:", {
-        a: numAt(r0, idxA),
-        e: numAt(r0, idxE),
-        i: numAt(r0, idxI),
-        raan: numAt(r0, idxRAAN),
-        w: numAt(r0, idxW),
-        nu: numAt(r0, idxNu),
-      });
-      console.log("orbit/slot:", { orbit, slot });
-      console.groupEnd();
+      addNodeLabel(mesh, id);
 
       const sat: SatT0 = {
         id,
@@ -468,12 +672,11 @@ async function loadT0() {
       };
 
       sats.value.push(sat);
-      scene?.add(mesh); // ✅ 成功一个就立刻 add，避免“中途失败导致 0 节点”
+      scene?.add(mesh);
 
       if (!t0Label.value) t0Label.value = utc;
     } catch (err) {
       console.error("[load one file failed]", file, err);
-      // 继续下一个文件
     }
   }
 
@@ -482,11 +685,59 @@ async function loadT0() {
   loadProgress.value = ready.value ? "done" : "no sats loaded";
 }
 
-// reactive rebuild links
-watch([showLinks, linkMode, nearestK, distKm], () => {
+async function loadDelayMatrix() {
+  try {
+    const res = await fetch(DELAY_CSV);
+    if (!res.ok) throw new Error(`Fetch failed: delay_15x15.csv (${res.status})`);
+
+    const text = await res.text();
+    const rows = parseCsv(text);
+    if (rows.length < 2) throw new Error("delay_15x15.csv too few rows");
+
+    const header = rows[0].slice(1);
+    const edges: DelayEdge[] = [];
+
+    for (let i = 1; i < rows.length; i++) {
+      const rowName = rows[i][0];
+      for (let j = 1; j < rows[i].length; j++) {
+        const colName = header[j - 1];
+        const v = Number(rows[i][j]);
+        if (!Number.isFinite(v) || v === 0) continue;
+
+        if (rowName < colName) {
+          edges.push({
+            aId: rowName,
+            bId: colName,
+            delayS: v,
+            distKm: v * C_KM_S,
+          });
+        }
+      }
+    }
+
+    delayEdges.value = edges;
+  } catch (e) {
+    console.error("[loadDelayMatrix failed]", e);
+    delayEdges.value = [];
+  }
+}
+
+// rebuild links when toggles change
+watch([showLinks, linkMode], () => {
   if (!ready.value) return;
   rebuildLinks();
 });
+
+// orbit 模式：selected 变化 → 更新高亮 delay edges
+watch(
+  () => selected.value?.id ?? null,
+  (id) => {
+    if (!ready.value) return;
+    if (!showLinks.value) return;
+    if (linkMode.value !== "orbit") return;
+    buildDelayHighlightForSelected(id);
+  }
+);
 
 onMounted(async () => {
   if (!host.value) return;
@@ -499,6 +750,14 @@ onMounted(async () => {
   renderer.setSize(host.value.clientWidth, host.value.clientHeight);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   host.value.appendChild(renderer.domElement);
+
+  labelRenderer = new CSS2DRenderer();
+  labelRenderer.setSize(host.value.clientWidth, host.value.clientHeight);
+  labelRenderer.domElement.style.position = "absolute";
+  labelRenderer.domElement.style.top = "0";
+  labelRenderer.domElement.style.left = "0";
+  labelRenderer.domElement.style.pointerEvents = "none";
+  host.value.appendChild(labelRenderer.domElement);
 
   camera = new THREE.PerspectiveCamera(45, host.value.clientWidth / host.value.clientHeight, 0.01, 2000);
   camera.position.set(0, 0, 12);
@@ -528,6 +787,7 @@ onMounted(async () => {
 
   try {
     await loadT0();
+    await loadDelayMatrix();
 
     rebuildLinks();
 
@@ -538,6 +798,7 @@ onMounted(async () => {
       const w = host.value.clientWidth;
       const h = host.value.clientHeight;
       renderer.setSize(w, h);
+      labelRenderer?.setSize(w, h);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
     });
@@ -561,12 +822,9 @@ onBeforeUnmount(() => {
   controls?.dispose();
   controls = null;
 
-  for (const line of orbitLinkLines.values()) {
-      scene?.remove(line);
-      line.geometry.dispose();
-      (line.material as THREE.Material).dispose();
-  }
-  orbitLinkLines.clear();
+  clearOrbitLinks();
+  clearDelayModeLinks();
+  clearDelayHighlight();
 
   if (scene) {
     for (const sat of sats.value) {
@@ -575,6 +833,13 @@ onBeforeUnmount(() => {
       (sat.mesh.material as THREE.Material).dispose();
     }
     scene = null;
+  }
+  sats.value = [];
+
+  if (labelRenderer) {
+    const el = labelRenderer.domElement;
+    labelRenderer = null;
+    el.parentElement?.removeChild(el);
   }
 
   if (renderer) {
@@ -704,5 +969,35 @@ onBeforeUnmount(() => {
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
     "Courier New", monospace;
+}
+
+/* Labels */
+.node-label {
+  white-space: nowrap;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #e8eeff;
+  transform: translate(-50%, -50%);
+}
+
+.edge-label {
+  white-space: pre;
+  font-size: 11px;
+  line-height: 1.25;
+  padding: 4px 6px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.52);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #e8eeff;
+  transform: translate(-50%, -50%);
+  max-width: 240px;
+}
+
+.edge-label--highlight {
+  border-color: rgba(255, 204, 102, 0.55);
+  box-shadow: 0 0 14px rgba(255, 204, 102, 0.18);
 }
 </style>

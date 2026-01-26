@@ -21,11 +21,11 @@ import TestThree from './components/TestThree.vue'
 }
 </style> -->
 <script setup lang="ts">
-  import SatTopology3D from "./components/SatTopology3D.vue";
+  import Dataviewer from "./components/dataviewer.vue";
   </script>
 <template>
   <div style="width: 100vw; height: 100vh; padding: 14px; box-sizing: border-box;">
-    <SatTopology3D />
+    <Dataviewer />
   </div>
 </template>
 
