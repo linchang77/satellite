@@ -1,0 +1,49 @@
+// src/router/index.js
+
+import { createRouter, createWebHistory } from 'vue-router'
+
+const routes = [
+  {
+    path: '/',
+    name: 'Home',
+    component: () => import('../components/HomeIndex.vue') // 假设你的主页在这里
+  },
+  {
+    // 星座仿真系统
+    path: '/simulation/Satelliteviewer',
+    name: 'Satelliteviewer',
+    component: () => import('../components/Satelliteviewer.vue') 
+  },
+  {
+    // 卫星网络拓扑
+    path: '/simulation/topology',
+    name: 'Topology',
+    component: () => import('../view/SatTopology.vue') 
+  },
+  {
+    // 卫星网络拓扑
+    path: '/simulation/topology2D',
+    name: 'Topology2D',
+    component: () => import('../components/SatelliteTopology.vue') 
+  },
+  {
+    // 卫星网络拓扑
+    path: '/simulation/topology3D',
+    name: 'Topology3D',
+    component: () => import('../components/SatTopology3D.vue') 
+  },
+  // 404 路由：匹配所有未定义的路径，重定向回主页
+  {
+    path: '/:pathMatch(.*)*',
+    redirect: '/'
+  }
+]
+
+// 2. 创建路由实例
+const router = createRouter({
+  // 使用 HTML5 模式 (也就是 URL 里没有 # 号)
+  history: createWebHistory(),
+  routes
+})
+
+export default router

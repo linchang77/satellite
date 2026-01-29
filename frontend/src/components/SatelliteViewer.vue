@@ -223,30 +223,30 @@ async function initializeViewer() {
         }
       })
       
-      // 覆盖范围实体
-      if (sensorConfig.type === 'SimpleConic') {
-        const halfAngleRad = Cesium.Math.toRadians(sensorConfig.halfAngleDeg || 30)
-        const altitudeMeters = satellite.alt_km * 1000
-        const bottomRadius = altitudeMeters * Math.tan(halfAngleRad)
-        console.log(bottomRadius);
+      // // 覆盖范围实体
+      // if (sensorConfig.type === 'SimpleConic') {
+      //   const halfAngleRad = Cesium.Math.toRadians(sensorConfig.halfAngleDeg || 30)
+      //   const altitudeMeters = satellite.alt_km * 1000
+      //   const bottomRadius = altitudeMeters * Math.tan(halfAngleRad)
+      //   console.log(bottomRadius);
         
-        viewer.entities.add({
-          id: (satellite.sat_id || satellite.stk_name) + '_coverage',
-          name: (satellite.stk_name || satellite.sat_id) + ' Coverage',
-          position: coveragePosProp,
-          cylinder: {
-            length: altitudeMeters,
-            topRadius: 0,
-            bottomRadius: bottomRadius,
-            material: Cesium.Color.fromCssColorString(color).withAlpha(0.2),
-            outline: true,
-            outlineColor: Cesium.Color.fromCssColorString(color),
-            numberOfVerticalLines: 0,
-            numberOfHorizontalLines: 0,
-            show: true
-          }
-        })
-      }
+      //   viewer.entities.add({
+      //     id: (satellite.sat_id || satellite.stk_name) + '_coverage',
+      //     name: (satellite.stk_name || satellite.sat_id) + ' Coverage',
+      //     position: coveragePosProp,
+      //     cylinder: {
+      //       length: altitudeMeters,
+      //       topRadius: 0,
+      //       bottomRadius: bottomRadius,
+      //       material: Cesium.Color.fromCssColorString(color).withAlpha(0.2),
+      //       outline: true,
+      //       outlineColor: Cesium.Color.fromCssColorString(color),
+      //       numberOfVerticalLines: 0,
+      //       numberOfHorizontalLines: 0,
+      //       show: true
+      //     }
+      //   })
+      // }
     })
     
     // 飞行到第一个卫星的初始位置
@@ -291,9 +291,10 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .cesium-container {
-  height: 80vh;
+  height: 100vh; 
   width: 100%;
   position: relative;
+  overflow: hidden; /* 防止出现滚动条 */
 }
 
 .viewer {

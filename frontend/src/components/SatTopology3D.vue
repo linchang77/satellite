@@ -43,13 +43,7 @@
           Orbit grouping inferred from filename: <span class="mono">Sat_&lt;orbit&gt;_&lt;slot&gt;_...</span>
         </div>
       </div>
-    </div>
 
-    <div class="center">
-      <div ref="host" class="viewport"></div>
-    </div>
-
-    <div class="right">
       <div class="card">
         <div class="h">Selection</div>
         <div v-if="selected">
@@ -76,13 +70,16 @@
         </div>
         <div v-else class="small">Click a satellite node to inspect.</div>
       </div>
+    </div>
 
-      <div class="card">
-        <div class="h">Controls</div>
-        <div class="small">
-          Left drag: rotate<br />
-          Wheel: zoom<br />
-          Right drag: pan
+    <div class="center">
+      <div ref="host" class="viewport"></div>
+    </div>
+
+    <div class="right">
+      <div class="placeholder-box">
+        <div class="small" style="text-align: center; margin-top: 40%;">
+          2D Topology Container<br/>(Reserved)
         </div>
       </div>
     </div>
@@ -96,6 +93,9 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { CSS2DRenderer, CSS2DObject } from "three/examples/jsm/renderers/CSS2DRenderer.js";
 import { TubeGeometry, LineCurve3 } from "three";
 
+// ---------------------------------------------------------
+// TypeScript 类型定义
+// ---------------------------------------------------------
 type SatT0 = {
   id: string;
   orbit: number;
@@ -127,6 +127,9 @@ type DelayEdge = {
   distKm: number;
 };
 
+// ---------------------------------------------------------
+// 状态与引用
+// ---------------------------------------------------------
 const host = ref<HTMLDivElement | null>(null);
 
 const loading = ref(true);
@@ -209,7 +212,9 @@ const CSV_FILES = [
 
 const BASE_URL = "/data/Xingli_xls_15/";
 
-// ---------- utils ----------
+// ---------------------------------------------------------
+// 工具函数
+// ---------------------------------------------------------
 function fmt(x: number, digits: number) {
   return Number.isFinite(x) ? x.toFixed(digits) : "-";
 }
@@ -240,7 +245,9 @@ function parseOrbitSlotFromFilename(name: string) {
   };
 }
 
-// ---------- three ----------
+// ---------------------------------------------------------
+// Three.js 核心逻辑
+// ---------------------------------------------------------
 function makeNodeMesh() {
   const geo = new THREE.SphereGeometry(0.09, 20, 20);
   const mat = new THREE.MeshStandardMaterial({
@@ -320,20 +327,15 @@ function clearDelayHighlight() {
   if (!scene) return;
   if (!delayHighlightGroup) return;
 
-  // 先从 scene 移除整个 group
   scene.remove(delayHighlightGroup);
 
-  // 再把里面所有子对象显式移除并释放资源
   const toDispose: THREE.Object3D[] = [];
   delayHighlightGroup.traverse((obj) => {
     toDispose.push(obj);
   });
 
   for (const obj of toDispose) {
-    // ✅ 标签：CSS2DObject 也是 Object3D，需要 remove 掉
     if (obj.parent) obj.parent.remove(obj);
-
-    // ✅ 粗线：Mesh 要 dispose
     if (obj instanceof THREE.Mesh) {
       (obj.geometry as THREE.BufferGeometry)?.dispose?.();
       const mat = obj.material as THREE.Material | THREE.Material[];
@@ -360,7 +362,6 @@ function clearAllSats() {
 function buildOrbitLinksOnly() {
   if (!scene) return;
 
-  // orbit -> sats
   const map = new Map<number, SatT0[]>();
   for (const sat of sats.value) {
     const arr = map.get(sat.orbit) ?? [];
@@ -470,14 +471,12 @@ function buildDelayHighlightForSelected(selectedId: string | null) {
     const pa = a.mesh.position.clone();
     const pb = b.mesh.position.clone();
 
-    // 粗线（Tube）
     const curve = new LineCurve3(pa, pb);
     const tube = new TubeGeometry(curve, HIGHLIGHT_TUBULAR_SEG, HIGHLIGHT_RADIUS, HIGHLIGHT_RADIAL_SEG, false);
     const tubeMesh = new THREE.Mesh(tube, mat);
     tubeMesh.frustumCulled = false;
     group.add(tubeMesh);
 
-    // 标签（注意：add 到 group，不要 add 到 scene）
     const mid = new THREE.Vector3().addVectors(pa, pb).multiplyScalar(0.5);
 
     const div = document.createElement("div");
@@ -488,13 +487,12 @@ function buildDelayHighlightForSelected(selectedId: string | null) {
 
     const obj = new CSS2DObject(div);
     obj.position.copy(mid);
-    group.add(obj); // ✅ 关键：只挂在 group 下
+    group.add(obj);
   }
 
   scene.add(group);
   delayHighlightGroup = group;
 }
-
 
 function rebuildLinks() {
   if (!scene) return;
@@ -517,7 +515,6 @@ function rebuildLinks() {
   }
 }
 
-// ✅ 关键：只拾取节点，不拾取 tube / 线段 / labels
 function pickSatMesh(ev: PointerEvent): THREE.Mesh | null {
   if (!renderer || !camera) return null;
 
@@ -527,7 +524,6 @@ function pickSatMesh(ev: PointerEvent): THREE.Mesh | null {
 
   raycaster.setFromCamera(pointer, camera);
 
-  // ✅ 只检测卫星节点 mesh（避免点到 tube 时不取消）
   const hits = raycaster.intersectObjects(
     sats.value.map((s) => s.mesh),
     false
@@ -539,7 +535,6 @@ function pickSatMesh(ev: PointerEvent): THREE.Mesh | null {
 function onPointerDown(ev: PointerEvent) {
   const mesh = pickSatMesh(ev);
 
-  // ✅ 点空白：一律取消选中 + 清除高亮/标签
   if (!mesh) {
     setHighlight(null);
     selected.value = null;
@@ -548,7 +543,6 @@ function onPointerDown(ev: PointerEvent) {
     return;
   }
 
-  // ✅ 点到节点：选中
   setHighlight(mesh);
 
   const ud = mesh.userData as { id: string };
@@ -583,7 +577,9 @@ function animate() {
   raf = requestAnimationFrame(animate);
 }
 
-// ---------- data ----------
+// ---------------------------------------------------------
+// 加载数据
+// ---------------------------------------------------------
 async function loadT0() {
   loading.value = true;
   ready.value = false;
@@ -722,13 +718,11 @@ async function loadDelayMatrix() {
   }
 }
 
-// rebuild links when toggles change
 watch([showLinks, linkMode], () => {
   if (!ready.value) return;
   rebuildLinks();
 });
 
-// orbit 模式：selected 变化 → 更新高亮 delay edges
 watch(
   () => selected.value?.id ?? null,
   (id) => {
@@ -739,6 +733,9 @@ watch(
   }
 );
 
+// ---------------------------------------------------------
+// 生命周期
+// ---------------------------------------------------------
 onMounted(async () => {
   if (!host.value) return;
 
@@ -770,7 +767,6 @@ onMounted(async () => {
 
   addLights(scene);
 
-  // stars
   {
     const starCount = 900;
     const positions = new Float32Array(starCount * 3);
@@ -793,6 +789,7 @@ onMounted(async () => {
 
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
 
+    // 监听 Resize，确保布局变动时 3D 视图也跟着变
     resizeObs = new ResizeObserver(() => {
       if (!host.value || !renderer || !camera) return;
       const w = host.value.clientWidth;
@@ -855,7 +852,8 @@ onBeforeUnmount(() => {
 <style scoped>
 .wrap {
   display: grid;
-  grid-template-columns: 320px 1fr 320px;
+  /* 调整布局：左侧加宽，中间和右侧共享剩余空间 */
+  grid-template-columns: 350px 1fr 1fr;
   height: 100vh;
   background: #050817;
   color: #e8eeff;
@@ -867,6 +865,8 @@ onBeforeUnmount(() => {
   padding: 12px;
   overflow: auto;
 }
+
+/* center 不需要额外调整，宽度由 grid 决定 */
 .center {
   position: relative;
   padding: 12px 0;
@@ -878,6 +878,16 @@ onBeforeUnmount(() => {
   border-radius: 14px;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.placeholder-box {
+  width: 100%;
+  height: 100%;
+  border-radius: 14px;
+  border: 1px dashed rgba(255, 255, 255, 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .card {
