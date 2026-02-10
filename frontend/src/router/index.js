@@ -22,15 +22,15 @@ const routes = [
   },
   {
     // 卫星网络拓扑
-    path: '/simulation/topology2D',
+    path: '/simulation/topology3D',
     name: 'Topology2D',
-    component: () => import('../components/SatelliteTopology.vue') 
+    component: () => import('../components/SatTopology3D.vue') 
   },
   {
-    // 卫星网络拓扑
-    path: '/simulation/topology3D',
+    // 卫星物理拓扑
+    path: '/simulation/topology2D',
     name: 'Topology3D',
-    component: () => import('../components/SatTopology3D.vue') 
+    component: () => import('../components/SatTopology2D.vue') 
   },
   // 404 路由：匹配所有未定义的路径，重定向回主页
   {
